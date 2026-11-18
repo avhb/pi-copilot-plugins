@@ -90,20 +90,27 @@ export async function fetchMarketplace(source: string, force = false): Promise<{
   const token = getGitHubToken();
   if (token) headers["Authorization"] = `token ${token}`;
 
-  // Try the standard marketplace.json location
-  const url = `https://raw.githubusercontent.com/${owner}/${repo}/main/.github/plugin/marketplace.json`;
+  // Try 'main' first, then 'master'
+  let branch = "main";
+  const marketplaceUrl = (ref: string) =>
+    `https://raw.githubusercontent.com/${owner}/${repo}/${ref}/.github/plugin/marketplace.json`;
 
   let response: Response;
   try {
-    response = await fetch(url, { headers });
+    response = await fetch(marketplaceUrl(branch), { headers });
+    // Try 'master' when 'main' is missing
+    if (response.status === 404) {
+      branch = "master";
+      response = await fetch(marketplaceUrl(branch), { headers });
+    }
   } catch {
-    // Try 'master' branch as fallback
-    const urlMaster = `https://raw.githubusercontent.com/${owner}/${repo}/master/.github/plugin/marketplace.json`;
-    response = await fetch(urlMaster, { headers });
+    // Try 'master' branch when the request fails
+    branch = "master";
+    response = await fetch(marketplaceUrl(branch), { headers });
   }
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch marketplace from ${source}: HTTP ${response.status}`);
+    throw new Error(`Failed to fetch marketplace from ${source}: HTTP ${response.status} (${branch})`);
   }
 
   const manifest = (await response.json()) as MarketplaceManifest;

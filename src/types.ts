@@ -107,9 +107,16 @@ export interface PiMcpServer {
 /** Marketplace.json top-level */
 export interface MarketplaceManifest {
   name: string;
-  owner?: { name: string; email?: string };
-  metadata?: { description?: string; version?: string };
+  owner?: { name: string; email?: string; url?: string };
+  metadata?: {
+    description?: string;
+    version?: string;
+    /** Base path prepended to relative plugin sources. */
+    pluginRoot?: string;
+  };
   plugins: MarketplacePlugin[];
+  /** Marketplace name aliases (old name → new name). */
+  renames?: Record<string, string>;
 }
 
 /** A single plugin entry in a marketplace */
@@ -127,9 +134,12 @@ export interface MarketplacePlugin {
 
 /** Source specification for a marketplace plugin */
 export interface MarketplaceSource {
-  source: "github";
-  repo: string;
+  source: "github" | "url";
+  repo?: string;
+  url?: string;
   path?: string;
+  ref?: string;
+  sha?: string;
 }
 
 // ─── Plugin Source Types ─────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install name@marketplace` now clones the marketplace source (not the registered marketplace name)
 - Peek reports manifest read/validation errors separately from missing catalog entries
 - Peek and install read manifests from `.github/plugin/plugin.json`, `.plugin/plugin.json`, and `.claude-plugin/plugin.json` inside the plugin directory
+- `update --all` uses the registry source (including the resolved plugin path and scope) instead of the flattened repository name
 
 ## [1.0.2] — 2026-11-20
 

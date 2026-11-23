@@ -10,6 +10,7 @@ import {
 import { validateManifest } from "./validator.js";
 import {
   listPlugins,
+  readRegistry,
   registerMarketplace,
   unregisterMarketplace,
   listMarketplaces,
@@ -311,11 +312,19 @@ export async function cmdUpdate(name?: string, all = false): Promise<void> {
   }
 
   if (all) {
-    const plugins = listPlugins();
+    // Use the registry entries, not the flattened display info: `update --all`
+    // must keep the resolved source path (e.g. a marketplace pluginRoot) and scope.
+    const plugins = Object.values(readRegistry().plugins);
     console.log(`Updating ${plugins.length} plugins...`);
     for (const plugin of plugins) {
       console.log(`  Updating "${plugin.name}"...`);
-      await cmdInstall(plugin.source);
+      const result = await installPluginPackage(
+        { name: plugin.name, source: plugin.source },
+        plugin.scope === "project"
+      );
+      if (!result.success) {
+        console.error(`  ✗ Failed to update "${plugin.name}": ${result.errors?.join(", ") || "unknown error"}`);
+      }
     }
     console.log("✓ All plugins updated.");
     return;

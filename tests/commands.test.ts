@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { parseSpec } from "../src/commands.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { parseSpec, cmdUpdate } from "../src/commands.js";
+import * as installer from "../src/installer.js";
+import { installPlugin, uninstallPlugin } from "../src/registry.js";
 
 describe("parseSpec", () => {
   it("parses marketplace format", () => {
@@ -47,5 +49,35 @@ describe("parseSpec", () => {
     const result = parseSpec("/home/user/my-plugin");
     expect(result.name).toBe("my-plugin");
     expect(result.source.type).toBe("local");
+  });
+});
+
+describe("cmdUpdate --all", () => {
+  const PLUGIN = "update-all-example";
+
+  beforeEach(() => {
+    uninstallPlugin(PLUGIN);
+  });
+
+  afterEach(() => {
+    uninstallPlugin(PLUGIN);
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the resolved source path and scope from the registry", async () => {
+    const source = {
+      type: "github" as const,
+      repo: "acme/marketplace",
+      path: "plugins/example-plugin",
+    };
+    installPlugin(PLUGIN, source, "1.0.0", [], [], [], "project");
+
+    const install = vi
+      .spyOn(installer, "installPluginPackage")
+      .mockResolvedValue({ success: true, pluginName: PLUGIN, mcpServers: [], skills: [], agents: [] });
+
+    await cmdUpdate(undefined, true);
+
+    expect(install).toHaveBeenCalledWith({ name: PLUGIN, source }, true);
   });
 });

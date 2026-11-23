@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fetchMarketplace } from "../src/marketplace.js";
+import { fetchMarketplace, marketplacePluginToSpec, resolvePluginPath, normalizeRepoPath } from "../src/marketplace.js";
+import type { MarketplacePlugin } from "../src/types.js";
 
 const MANIFEST = { name: "test-marketplace", plugins: [] };
 
@@ -12,6 +13,10 @@ function okResponse(): Response {
 
 function notFoundResponse(): Response {
   return new Response(null, { status: 404 });
+}
+
+function plugin(source: string | MarketplacePlugin["source"]): MarketplacePlugin {
+  return { name: "example-plugin", source };
 }
 
 beforeEach(() => {
@@ -67,5 +72,92 @@ describe("fetchMarketplace branch fallback", () => {
 
     await expect(fetchMarketplace("avhb/mkt-missing", true)).rejects.toThrow(/HTTP 404/);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("normalizeRepoPath", () => {
+  it("strips leading ./ and slashes", () => {
+    expect(normalizeRepoPath("./plugins/example-plugin")).toBe("plugins/example-plugin");
+    expect(normalizeRepoPath("/plugins/example-plugin/")).toBe("plugins/example-plugin");
+  });
+
+  it("converts Windows separators", () => {
+    expect(normalizeRepoPath(".\\plugins\\example-plugin")).toBe("plugins/example-plugin");
+  });
+});
+
+describe("resolvePluginPath", () => {
+  it("joins pluginRoot and a relative source", () => {
+    expect(resolvePluginPath("example-plugin", "./plugins")).toBe("plugins/example-plugin");
+  });
+
+  it("does not duplicate an already-prefixed source", () => {
+    expect(resolvePluginPath("./plugins/example-plugin", "./plugins")).toBe("plugins/example-plugin");
+  });
+
+  it("returns the source when pluginRoot is missing", () => {
+    expect(resolvePluginPath("./plugins/example-plugin")).toBe("plugins/example-plugin");
+  });
+});
+
+describe("marketplacePluginToSpec", () => {
+  it("resolves a bare plugin name against marketplace pluginRoot", () => {
+    const spec = marketplacePluginToSpec(plugin("example-plugin"), "acme/marketplace", "./plugins");
+
+    expect(spec.source).toEqual({
+      type: "github",
+      repo: "acme/marketplace",
+      path: "plugins/example-plugin",
+    });
+  });
+
+  it("does not double the pluginRoot when the source already includes it", () => {
+    const spec = marketplacePluginToSpec(plugin("./plugins/example-plugin"), "acme/marketplace", "./plugins");
+
+    expect(spec.source).toEqual({
+      type: "github",
+      repo: "acme/marketplace",
+      path: "plugins/example-plugin",
+    });
+  });
+
+  it("treats a bare name as a relative path without pluginRoot", () => {
+    const spec = marketplacePluginToSpec(plugin("example-plugin"), "acme/marketplace");
+
+    expect(spec.source).toEqual({
+      type: "github",
+      repo: "acme/marketplace",
+      path: "example-plugin",
+    });
+  });
+
+  it("keeps owner/repo string sources as standalone repositories", () => {
+    const spec = marketplacePluginToSpec(plugin("acme/example-plugin"), "acme/marketplace");
+
+    expect(spec.source).toEqual({ type: "github", repo: "acme/example-plugin" });
+  });
+
+  it("resolves pluginRoot for prefixed path sources", () => {
+    const spec = marketplacePluginToSpec(plugin("plugins/example-plugin"), "acme/marketplace", "plugins");
+
+    expect(spec.source).toEqual({
+      type: "github",
+      repo: "acme/marketplace",
+      path: "plugins/example-plugin",
+    });
+  });
+
+  it("converts github object sources", () => {
+    const spec = marketplacePluginToSpec(
+      plugin({ source: "github", repo: "acme/example-plugin", path: "plugins/example-plugin" }),
+      "acme/marketplace",
+      "./plugins"
+    );
+
+    expect(spec.source).toEqual({
+      type: "github",
+      repo: "acme/example-plugin",
+      path: "plugins/example-plugin",
+    });
   });
 });

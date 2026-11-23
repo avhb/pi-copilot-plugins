@@ -7,7 +7,7 @@ import { COPILOT_PLUGINS_JSON } from "./types.js";
 
 import type { PluginSpec } from "./types.js";
 import { listMarketplacePlugins, findPluginInMarketplace, searchMarketplacePlugins, marketplacePluginToSpec, fetchMarketplace } from "./marketplace.js";
-import { installPluginPackage, uninstallPluginPackage, reinstallPluginPackage, updatePluginPackage, peekManifest, peekSkills } from "./installer.js";
+import { installPluginPackage, uninstallPluginPackage, reinstallPluginPackage, updatePluginPackage, peekManifestResult, peekSkills } from "./installer.js";
 import { listPlugins, enablePlugin, disablePlugin, getMarketplace, getPlugin, uninstallPlugin, registerMarketplace, unregisterMarketplace, listMarketplaces } from "./registry.js";
 import { TOOL_NAMES, lockTools, unlockTools, isToolsLocked, setToolsEnabled, isToolsEnabled, readOrCreateConfig } from "./types.js";
 
@@ -1079,13 +1079,25 @@ async function handlePeek(spec: string): Promise<import("@earendil-works/pi-codi
       if (targetMarketplace && mp.source !== targetMarketplace && mp.name !== targetMarketplace) continue;
 
       try {
-        const { plugins } = await listMarketplacePlugins(mp.source);
+        const { plugins, pluginRoot } = await listMarketplacePlugins(mp.source);
         const match = plugins.find(p => p.name.toLowerCase() === pluginName.toLowerCase());
         if (!match) continue;
 
-        const pluginSpec = marketplacePluginToSpec(match, mp.source);
-        const manifest = await peekManifest(pluginSpec);
-        if (!manifest) continue;
+        const pluginSpec = marketplacePluginToSpec(match, mp.source, pluginRoot);
+        const peek = await peekManifestResult(pluginSpec);
+
+        const sourceDisplay = typeof match.source === "string" ? match.source : JSON.stringify(match.source);
+
+        if (!peek.manifest) {
+          return {
+            content: [{
+              type: "text",
+              text: `Found **${match.name}** in ${mp.source}, but failed to read its manifest:\n${peek.error ?? "Unknown manifest error"}\n\nsource: ${sourceDisplay}`,
+            }],
+            details: { error: peek.error },
+          };
+        }
+        const manifest = peek.manifest;
 
         const skills = await peekSkills(pluginSpec);
 
@@ -1099,7 +1111,7 @@ async function handlePeek(spec: string): Promise<import("@earendil-works/pi-codi
         let output = `**${match.name}**${match.version ? ` v${match.version}` : ""}\n`;
         output += `from ${mp.source}\n`;
         if (match.description) output += `${match.description}\n`;
-        output += `source: ${typeof match.source === "string" ? match.source : JSON.stringify(match.source)}\n`;
+        output += `source: ${sourceDisplay}\n`;
 
         if (mcpServers.length) {
           output += `\nMCP servers:\n`;

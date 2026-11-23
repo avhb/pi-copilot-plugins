@@ -125,9 +125,9 @@ export async function fetchMarketplace(source: string, force = false): Promise<{
  * List plugins from a marketplace.
  * @param force - If true, bypass cache and always fetch from network.
  */
-export async function listMarketplacePlugins(source: string, force = false): Promise<{ plugins: MarketplacePlugin[]; stale: boolean }> {
+export async function listMarketplacePlugins(source: string, force = false): Promise<{ plugins: MarketplacePlugin[]; pluginRoot?: string; stale: boolean }> {
   const { manifest, stale } = await fetchMarketplace(source, force);
-  return { plugins: manifest.plugins, stale };
+  return { plugins: manifest.plugins, pluginRoot: manifest.metadata?.pluginRoot, stale };
 }
 
 /**
@@ -138,9 +138,9 @@ export async function findPluginInMarketplace(
   source: string,
   name: string,
   force = false
-): Promise<{ plugin: MarketplacePlugin | undefined; stale: boolean }> {
-  const { plugins, stale } = await listMarketplacePlugins(source, force);
-  return { plugin: plugins.find((p) => p.name === name), stale };
+): Promise<{ plugin: MarketplacePlugin | undefined; pluginRoot?: string; stale: boolean }> {
+  const { plugins, pluginRoot, stale } = await listMarketplacePlugins(source, force);
+  return { plugin: plugins.find((p) => p.name === name), pluginRoot, stale };
 }
 
 /**
@@ -185,37 +185,68 @@ export function isMarketplaceRegistered(name: string): boolean {
 }
 
 /**
+ * Normalize a repository-relative path.
+ * Converts backslashes, strips leading "./" and slashes, and removes trailing slashes.
+ */
+export function normalizeRepoPath(path: string): string {
+  return path
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+/**
+ * Resolve a marketplace plugin's relative source path.
+ * The marketplace `metadata.pluginRoot` is used as the base directory. A source
+ * that already includes the root prefix is returned unchanged to tolerate
+ * marketplaces that write both fields with the full path.
+ */
+export function resolvePluginPath(sourcePath: string, pluginRoot?: string): string {
+  const source = normalizeRepoPath(sourcePath);
+  const root = pluginRoot ? normalizeRepoPath(pluginRoot) : "";
+
+  if (!root || root === ".") return source;
+  if (source === root || source.startsWith(`${root}/`)) return source;
+
+  return `${root}/${source}`;
+}
+
+/**
  * Convert a marketplace plugin source to a PluginSource.
  * @param marketplaceSource - The full repo path of the marketplace (e.g. "github/awesome-copilot").
  *                            Used when plugin.source is a subdirectory path within the marketplace.
+ * @param pluginRoot - Optional `metadata.pluginRoot` base path from the marketplace manifest.
  */
 export function marketplacePluginToSpec(
   plugin: MarketplacePlugin,
-  marketplaceSource: string
+  marketplaceSource: string,
+  pluginRoot?: string
 ): PluginSpec {
   let source: PluginSource;
 
   if (typeof plugin.source === "string") {
-    // Direct path string — check if it's a subdirectory within the marketplace repo
-    // vs a standalone GitHub repo reference
-    const parts = plugin.source.split("/");
-    
+    const rawSource = plugin.source;
+    const parts = rawSource.split("/").filter(Boolean);
+
     // Known directory patterns that indicate a subdirectory within the marketplace
     const subdirectoryPatterns = ["plugins", "agents", "skills", "mcp", "tools", "extensions"];
-    const isSubdirectory = parts.length > 2 || subdirectoryPatterns.includes(parts[0]);
-    
-    if (isSubdirectory) {
-      // Subdirectory within the marketplace repo
-      source = { type: "github", repo: marketplaceSource, path: plugin.source };
-    } else {
+    // A bare "owner/repo" string without pluginRoot is a standalone GitHub repo reference
+    const isStandaloneRepo = !pluginRoot && parts.length === 2 && !subdirectoryPatterns.includes(parts[0]);
+
+    if (isStandaloneRepo) {
       // Standalone GitHub repo
-      source = { type: "github", repo: plugin.source };
+      source = { type: "github", repo: rawSource };
+    } else {
+      // Relative path within the marketplace repo, anchored at pluginRoot
+      source = { type: "github", repo: marketplaceSource, path: resolvePluginPath(rawSource, pluginRoot) };
     }
-  } else if (typeof plugin.source === "object" && "source" in plugin.source) {
-    // MarketplaceSource with source: "github"
-    const ms = plugin.source as { source: string; repo: string; path?: string };
-    if (ms.source === "github") {
+  } else if (typeof plugin.source === "object" && plugin.source && "source" in plugin.source) {
+    const ms = plugin.source as { source: string; repo?: string; url?: string; path?: string; ref?: string; sha?: string };
+    if (ms.source === "github" && ms.repo) {
       source = { type: "github", repo: ms.repo, path: ms.path };
+    } else if (ms.source === "url" && ms.url) {
+      source = { type: "git", url: ms.url };
     } else {
       source = { type: "local", path: JSON.stringify(plugin.source) };
     }

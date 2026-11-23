@@ -4,7 +4,7 @@ import {
   installPluginPackage,
   uninstallPluginPackage,
   reinstallPluginPackage,
-  peekManifest,
+  peekManifestResult,
   peekSkills,
 } from "./installer.js";
 import { validateManifest } from "./validator.js";
@@ -130,7 +130,10 @@ export async function cmdInstall(spec: string, local = false, verbose = false, d
       throw new Error(`Plugin "${pluginSpec.name}" not found in marketplace "${marketplaceName}"`);
     }
 
-    pluginSpec.source = { ...marketplacePluginToSpec(plugin.plugin, marketplaceName).source, scope };
+    pluginSpec.source = {
+      ...marketplacePluginToSpec(plugin.plugin, marketplace.source, plugin.pluginRoot).source,
+      scope,
+    };
   }
 
   if (dryRun) {
@@ -612,6 +615,8 @@ interface PeekResult {
   skills?: string[];
   agents?: string[];
   warnings?: string[];
+  /** Set when the catalog entry was found but its manifest could not be read. */
+  error?: string;
 }
 
 /**
@@ -645,26 +650,15 @@ export async function cmdPeek(spec: string, json = false): Promise<void> {
     if (targetMarketplace && mp.source !== targetMarketplace && mp.name !== targetMarketplace) continue;
 
     try {
-      const { plugins } = await listMarketplacePlugins(mp.source);
+      const { plugins, pluginRoot } = await listMarketplacePlugins(mp.source);
       const match = plugins.find(p => p.name.toLowerCase() === pluginName.toLowerCase());
       if (!match) continue;
 
       // Convert to PluginSpec for peekManifest
-      const pluginSpec = marketplacePluginToSpec(match, mp.source);
+      const pluginSpec = marketplacePluginToSpec(match, mp.source, pluginRoot);
 
       // Peek the manifest
-      const manifest = await peekManifest(pluginSpec);
-      if (!manifest) continue;
-
-      // Peek actual skills from the skills directory
-      const skills = await peekSkills(pluginSpec);
-
-      const mcpServers = "mcpServers" in manifest && manifest.mcpServers && typeof manifest.mcpServers === "object"
-        ? Object.keys(manifest.mcpServers as Record<string, unknown>)
-        : [];
-      const agents = "agents" in manifest && manifest.agents && Array.isArray(manifest.agents)
-        ? extractNames(manifest.agents)
-        : [];
+      const peek = await peekManifestResult(pluginSpec);
 
       const result: PeekResult = {
         marketplace: mp.source,
@@ -672,10 +666,28 @@ export async function cmdPeek(spec: string, json = false): Promise<void> {
         version: match.version,
         description: match.description,
         source: typeof match.source === "string" ? match.source : JSON.stringify(match.source),
-        mcpServers,
-        skills,
-        agents,
       };
+
+      if (!peek.manifest) {
+        // The catalog entry exists, but its manifest is missing or invalid.
+        result.error = peek.error ?? "Unknown manifest error";
+        results.push(result);
+        continue;
+      }
+
+      // Peek actual skills from the skills directory
+      const skills = await peekSkills(pluginSpec);
+
+      const mcpServers = "mcpServers" in peek.manifest && peek.manifest.mcpServers && typeof peek.manifest.mcpServers === "object"
+        ? Object.keys(peek.manifest.mcpServers as Record<string, unknown>)
+        : [];
+      const agents = "agents" in peek.manifest && peek.manifest.agents && Array.isArray(peek.manifest.agents)
+        ? extractNames(peek.manifest.agents)
+        : [];
+
+      result.mcpServers = mcpServers;
+      result.skills = skills;
+      result.agents = agents;
 
       // Check for warnings
       if (!result.mcpServers?.length && !result.skills?.length && !result.agents?.length) {
@@ -698,8 +710,17 @@ export async function cmdPeek(spec: string, json = false): Promise<void> {
     return;
   }
 
+  const readable = results.filter(r => !r.error);
+  if (readable.length === 0) {
+    for (const result of results) {
+      console.error(red(`Found "${result.name}" in ${result.marketplace} but failed to read its manifest:`));
+      console.error(`  ${result.error}`);
+    }
+    return;
+  }
+
   // Check if any results have installable components
-  const hasInstallable = results.some(r => r.mcpServers?.length || r.skills?.length || r.agents?.length);
+  const hasInstallable = readable.some(r => r.mcpServers?.length || r.skills?.length || r.agents?.length);
   if (!hasInstallable) {
     console.log(cyan(`Found "${pluginName}" but no installable components (MCP servers, skills, or agents).`));
     console.log(`  These plugins may only contain Copilot-specific extensions, which are not supported by Pi.`);
@@ -714,6 +735,11 @@ export async function cmdPeek(spec: string, json = false): Promise<void> {
       console.log(`  ${result.description}`);
     }
     console.log(`  source: ${result.source}`);
+
+    if (result.error) {
+      console.log(red(`  ⚠️  Could not read manifest: ${result.error}`));
+      continue;
+    }
 
     if (result.mcpServers?.length) {
       console.log(`  MCP servers:`);

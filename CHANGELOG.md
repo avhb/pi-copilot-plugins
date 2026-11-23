@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Marketplace plugins that declare `metadata.pluginRoot` now resolve relative sources inside the marketplace repository instead of cloning an unrelated `owner/repo` GitHub repository
+- `install name@marketplace` now clones the marketplace source (not the registered marketplace name)
+- Peek reports manifest read/validation errors separately from missing catalog entries
+- Peek and install read manifests from `.github/plugin/plugin.json`, `.plugin/plugin.json`, and `.claude-plugin/plugin.json` inside the plugin directory
+
 ## [1.0.2] — 2026-11-20
 
 ### Fixed

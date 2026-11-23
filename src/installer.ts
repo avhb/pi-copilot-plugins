@@ -83,39 +83,78 @@ function copyDir(src: string, dest: string): void {
  * Returns null if the manifest cannot be read.
  */
 export async function peekManifest(spec: PluginSpec): Promise<PluginManifest | null> {
+  const { manifest } = await peekManifestResult(spec);
+  return manifest;
+}
+
+export interface PeekManifestResult {
+  manifest: PluginManifest | null;
+  /** Human-readable reason when the manifest cannot be read. */
+  error?: string;
+}
+
+/** Manifest locations checked, in Copilot CLI lookup order. */
+const MANIFEST_PATHS = [
+  ".plugin/plugin.json",
+  "plugin.json",
+  ".github/plugin/plugin.json",
+  ".claude-plugin/plugin.json",
+];
+
+/**
+ * Peek at a plugin's manifest and report why it could not be read.
+ * Distinguishes a missing manifest from an invalid one.
+ */
+export async function peekManifestResult(spec: PluginSpec): Promise<PeekManifestResult> {
   try {
     if (spec.source.type === "github") {
       const { repo, path: subPath } = spec.source;
       // Normalize subPath — strip leading ./ for GitHub API
-      const normalizedSubPath = subPath ? subPath.replace(/^\.\//, "") : undefined;
+      const normalizedSubPath = subPath ? subPath.replace(/^\.\//, "").replace(/\/+$/, "") : undefined;
 
       // Build headers — add token if available (config takes precedence over env)
       const headers: Record<string, string> = { Accept: "application/vnd.github.v3+json" };
       const token = getGitHubToken();
       if (token) headers["Authorization"] = `token ${token}`;
 
-      // Try .github/plugin.json first (Agent Plugins 1.0)
-      const apiUrl = normalizedSubPath
-        ? `https://api.github.com/repos/${repo}/contents/${normalizedSubPath}/plugin.json`
-        : `https://api.github.com/repos/${repo}/contents/.github/plugin.json`;
+      // Agent Plugins and legacy manifests live at different locations inside the plugin directory
+      const manifestPaths = normalizedSubPath
+        ? MANIFEST_PATHS.map((p) => `${normalizedSubPath}/${p}`)
+        : MANIFEST_PATHS;
 
-      let response = await fetch(apiUrl, { headers });
+      const checked: string[] = [];
+      let invalidError: string | undefined;
 
-      if (response.ok) {
+      for (const manifestPath of manifestPaths) {
+        const apiUrl = `https://api.github.com/repos/${repo}/contents/${manifestPath}`;
+        checked.push(manifestPath);
+        const response = await fetch(apiUrl, { headers });
+
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            return {
+              manifest: null,
+              error: `GitHub API returned ${response.status} when reading ${manifestPath} from ${repo}. Check your GitHub token.`,
+            };
+          }
+          continue;
+        }
+
         const data = await response.json() as { content: string };
         const decoded = Buffer.from(data.content, "base64").toString("utf-8");
         try {
           const manifest = JSON.parse(decoded) as PluginManifest;
           if ("$schema" in manifest) {
             validateManifest(manifest);
-            return manifest;
+            return { manifest };
           }
           // Also accept legacy manifests (no $schema) that have mcpServers or skills
           if ("mcpServers" in manifest || "skills" in manifest || "agents" in manifest) {
-            return manifest;
+            return { manifest };
           }
-        } catch {
-          // Not valid JSON, try legacy format
+          invalidError = `Manifest ${manifestPath} does not declare a $schema and has no mcpServers, skills, or agents.`;
+        } catch (err: any) {
+          invalidError = `Invalid manifest at ${manifestPath}: ${err.message}`;
         }
       }
 
@@ -127,7 +166,8 @@ export async function peekManifest(spec: PluginSpec): Promise<PluginManifest | n
       }
       for (const legacyPath of legacyPaths) {
         const legacyUrl = `https://api.github.com/repos/${repo}/contents/${legacyPath}`;
-        response = await fetch(legacyUrl, { headers });
+        checked.push(legacyPath);
+        const response = await fetch(legacyUrl, { headers });
 
         if (response.ok) {
           const data = await response.json() as { content: string };
@@ -135,31 +175,38 @@ export async function peekManifest(spec: PluginSpec): Promise<PluginManifest | n
           try {
             const config = JSON.parse(decoded);
             // Create a legacy manifest from the MCP config
-            return createLegacyManifestFromContent(repo, subPath, config);
+            return { manifest: createLegacyManifestFromContent(repo, subPath, config) };
           } catch {
-            // Not valid JSON
+            invalidError = `Invalid JSON at ${legacyPath}.`;
           }
         }
       }
 
-      return null;
+      if (invalidError) {
+        return { manifest: null, error: invalidError };
+      }
+
+      return { manifest: null, error: `No plugin manifest found in ${repo}. Checked: ${checked.join(", ")}` };
     }
 
     if (spec.source.type === "git") {
       // For git URLs, try to get the archive and extract manifest
       // This is more complex and may not be worth implementing for now
-      return null;
+      return { manifest: null, error: "Peeking at git URLs is not supported. Install the plugin to inspect its manifest." };
     }
 
     if (spec.source.type === "local") {
       // For local paths, read the manifest directly
-      const manifest = readManifest(spec.source.path);
-      return manifest;
+      try {
+        return { manifest: readManifest(spec.source.path) };
+      } catch (err: any) {
+        return { manifest: null, error: err.message };
+      }
     }
 
-    return null;
-  } catch {
-    return null;
+    return { manifest: null, error: `Unsupported source type: ${spec.source.type}` };
+  } catch (err: any) {
+    return { manifest: null, error: err.message };
   }
 }
 
@@ -232,8 +279,8 @@ export async function downloadPlugin(
       throw new Error(`Unknown source type: ${spec.source}`);
   }
 
-  // Read and parse the manifest
-  const manifest = readManifest(cacheDir, spec.source.type === "github" ? spec.source.path : undefined);
+  // Read and parse the manifest (cacheDir already points at the plugin directory)
+  const manifest = readManifest(cacheDir);
 
   return { cacheDir, manifest, sha, subPath: spec.source.type === "github" ? spec.source.path : undefined };
 }
@@ -342,29 +389,23 @@ export async function peekSkills(spec: PluginSpec): Promise<string[]> {
 
 /**
  * Read the plugin manifest from a plugin directory.
- * Tries plugin.json first, then falls back to .mcp.json and .github/mcp.json.
- * If subPath is provided, also tries at that subdirectory.
+ * Tries the Copilot manifest lookup order, then falls back to legacy MCP configs.
+ * If subPath is provided, the plugin directory is resolved as pluginRoot/subPath.
  */
 export function readManifest(pluginRoot: string, subPath?: string): PluginManifest {
-  // Try paths in priority order
+  const pluginDirs = subPath ? [join(pluginRoot, subPath)] : [pluginRoot];
   const candidates: string[] = [];
 
-  if (subPath) {
-    // Agent Plugins 1.0: <subPath>/plugin.json
-    candidates.push(`${pluginRoot}/${subPath}/plugin.json`);
+  // Agent Plugins / legacy manifests inside the plugin directory
+  for (const dir of pluginDirs) {
+    for (const manifestPath of MANIFEST_PATHS) {
+      candidates.push(join(dir, manifestPath));
+    }
   }
 
-  // Legacy: .mcp.json or .github/mcp.json at root
-  candidates.push(`${pluginRoot}/.mcp.json`);
-  candidates.push(`${pluginRoot}/.github/mcp.json`);
-
-  // Also try at subPath for legacy
-  if (subPath) {
-    candidates.push(`${pluginRoot}/${subPath}/.mcp.json`);
-  }
-
-  // Root-level plugin.json as last resort
-  candidates.push(`${pluginRoot}/plugin.json`);
+  // Legacy: .mcp.json or .github/mcp.json at the repository root
+  candidates.push(join(pluginRoot, ".mcp.json"));
+  candidates.push(join(pluginRoot, ".github/mcp.json"));
 
   for (const manifestPath of candidates) {
     try {
@@ -432,12 +473,12 @@ export async function installPluginPackage(
     if (spec.source.type === "marketplace") {
       // Search ALL registered marketplaces for the plugin name
       const marketplaces = listMarketplaces();
-      let found: { plugin: MarketplacePlugin; source: string } | null = null;
+      let found: { plugin: MarketplacePlugin; source: string; pluginRoot?: string } | null = null;
 
       for (const mp of marketplaces) {
         const result = await findPluginInMarketplace(mp.source, spec.name);
         if (result.plugin) {
-          found = { plugin: result.plugin, source: mp.source };
+          found = { plugin: result.plugin, source: mp.source, pluginRoot: result.pluginRoot };
           break;
         }
       }
@@ -449,7 +490,7 @@ export async function installPluginPackage(
         );
       }
 
-      const resolvedSpec = marketplacePluginToSpec(found.plugin, found.source);
+      const resolvedSpec = marketplacePluginToSpec(found.plugin, found.source, found.pluginRoot);
       spec.name = resolvedSpec.name;
       spec.source = resolvedSpec.source;
     }
